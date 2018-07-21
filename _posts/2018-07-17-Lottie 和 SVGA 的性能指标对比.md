@@ -30,16 +30,17 @@ tags:
 # 文件大小
 下图是使用一个60帧的动画导出的 SVGA 和 Lottie 所对应的文件大小比较：
 
-![文件大小比较](../img/svga_lottie_file_size.png)
+
+![文件大小比较](https://github.com/gaoc08/gaoc08.github.io/blob/master/img/svga_lottie_file_size.png)
 
 # 内存 & CPU 占用
 
 ## 安卓
 
 1. svga：
-	![](../img/svga_lottie_android_cpu_mem_svga.png)
+	![](https://github.com/gaoc08/gaoc08.github.io/blob/master/img/svga_lottie_android_cpu_mem_svga.png)
 2. lottie：
-	![](../img/svga_lottie_android_cpu_mem_lottie.png)
+	![](https://github.com/gaoc08/gaoc08.github.io/blob/master/img/svga_lottie_android_cpu_mem_lottie.png)
 	
 > 以上数据是在现有项目中测试的，所以绝对值没有意义，只看对比即可。
 
@@ -47,11 +48,11 @@ tags:
 
 1. svga:
 	
-	![](../img/svga_lottie_ios_cpu_mem_svga.png)
+	![](https://github.com/gaoc08/gaoc08.github.io/blob/master/img/svga_lottie_ios_cpu_mem_svga.png)
 	
 2. lottie:
 	
-	![](../img/svga_lottie_ios_cpu_mem_lottie.png)
+	![](https://github.com/gaoc08/gaoc08.github.io/blob/master/img/svga_lottie_ios_cpu_mem_lottie.png)
 
 # 流畅度
 
@@ -59,11 +60,11 @@ tags:
 
 1. lottie 在视觉上是有非常明显的卡顿，实际的掉帧情况如图：
 
-	![](../img/svga_lottie_android_frames_lottie.png)
+	![](https://github.com/gaoc08/gaoc08.github.io/blob/master/img/svga_lottie_android_frames_lottie.png)
 
 2. svga 在视觉上是流畅的，实际上的掉帧情况如图：
 
-	![](../img/svga_lottie_android_frames_svga.png)
+	![](https://github.com/gaoc08/gaoc08.github.io/blob/master/img/svga_lottie_android_frames_svga.png)
 
 ## iOS
 
@@ -71,4 +72,4 @@ tags:
 
 # 结语
 
-![](../img/svga_lottie_conclusion.png)
+![](https://github.com/gaoc08/gaoc08.github.io/blob/master/img/svga_lottie_conclusion.png)
