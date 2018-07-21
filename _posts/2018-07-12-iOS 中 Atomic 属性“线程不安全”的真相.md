@@ -4,7 +4,7 @@ title:      iOS 中 Atomic 属性“线程不安全”的真相
 subtitle:   
 date:       2018-07-12
 author:     G
-header-img: img/post-bg-2015.jpg
+header-img: img/post-bg-debug.png
 catalog: true
 tags:
     - iOS
