@@ -30,8 +30,7 @@ tags:
 # 文件大小
 下图是使用一个60帧的动画导出的 SVGA 和 Lottie 所对应的文件大小比较：
 
-
-![文件大小比较](https://github.com/gaoc08/gaoc08.github.io/blob/master/img/svga_lottie_file_size.png)
+![](../img/svga_lottie_file_size.png?raw=true)
 
 # 内存 & CPU 占用
 
