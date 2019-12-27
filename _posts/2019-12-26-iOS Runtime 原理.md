@@ -32,9 +32,9 @@ Runtime 就解决了运行时如何正确处理消息发送的问题。
 
 # 1. 类和 NSObject 基本数据结构
 
-## 1. 实例 & 类 & 元类
+### 1. 实例 & 类 & 元类
 
-### 1. 实例(objc_object)
+##### 1. 实例(objc_object)
 
 ```c
 /// Represents an instance of a class.
@@ -46,7 +46,7 @@ struct objc_object {
 typedef struct objc_object *id;
 ```
 
-### 2. 类(objc_class)
+##### 2. 类(objc_class)
 
 ```c
 typedef struct objc_class *Class;
@@ -68,13 +68,13 @@ struct objc_class {
 
 ```
 
-### 3.元类(Meta class)
+##### 3.元类(Meta class)
 
 > 元类是一个概念，并不是一个新的 struct。
 
 
 
-### 4. 实例、类与元类直接的关系
+##### 4. 实例、类与元类直接的关系
 
 > 引用一张经典的 实例 - 类 - 元类 的关系图。
 
@@ -90,9 +90,9 @@ struct objc_class {
 8. 我们再看元类的父类链：子元类 -> 父元类 -> 根元类 -> 根类 -> nil。
 9. 通过以上两条父类链我们可以看到，元类的父类链和类的父类链是平行的，所以类方法和实例方法一样得到继承。
 
-## 2. Method & SEL & IMP
+### 2. Method & SEL & IMP
 
-### 1. 方法(objc_method)
+##### 1. 方法(objc_method)
 
 ```c
 typedef struct objc_method *Method;
@@ -106,7 +106,7 @@ struct objc_method {
 
 
 
-### 2. SEL (objc_selector)
+##### 2. SEL (objc_selector)
 
 ```c
 /// An opaque type that represents a method selector.
@@ -115,7 +115,7 @@ typedef struct objc_selector *SEL;
 
 
 
-### 3. IMP
+##### 3. IMP
 
 ```c
 /// A pointer to the function of a method implementation. 
@@ -130,7 +130,7 @@ typedef id (*IMP)(id, SEL, ...);
 
 
 
-### 4. 总结
+##### 4. 总结
 
 由于 SEL 只和函数名字有关，所以导致 iOS 不支持函数的重载（函数名相同，参数不同），不过 iOS 支持函数的重写，因为不同类可以有同名的 SEL。
 
@@ -138,9 +138,9 @@ IMP 和 SEL 在在 method 中是类似 key-value 的存储方式。所以 runtim
 
 
 
-## 3.缓存(objc_cache)
+### 3.缓存(objc_cache)
 
-1. 为何要有缓存
+1. ##### 为何要有缓存
 
    - 从上面的介绍中我们可以发现，方法在类中的存储是通过 list 来存储的。所以方法的查找就需要遍历 method_list，然后通过 SEL 的比对来找到 相应方法的 IMP，最终完成函数的调用。
 
@@ -155,7 +155,7 @@ IMP 和 SEL 在在 method 中是类似 key-value 的存储方式。所以 runtim
 
    - 特别是如果 myMethod 出现在 MyClass 的根类中，然后 MyClass 和父类的方法列表都很大的时候。那性能的消耗就难以想象了。。。
 
-2. 定义
+2. ##### 定义
 
    ```c
    typedef struct objc_cache *Cache
@@ -166,13 +166,13 @@ IMP 和 SEL 在在 method 中是类似 key-value 的存储方式。所以 runtim
    };
    ```
 
-3. 如何实现缓存
+3. ##### 如何实现缓存
 
    存储的数据结构使用了散列表。
 
    
 
-## 4. Category(objc_category)
+### 4. Category(objc_category)
 
 
 
