@@ -70,11 +70,11 @@ typedef struct objc_object *id;
 
 
 
-#### 3. 原类(Meta class)
+#### 3.元类(Meta class)
 
-> 原类是一个概念，并不是一个新的 struct。
+> 元类是一个概念，并不是一个新的 struct。
 
-> 引用一张经典的 实例 - 类 - 原类 的关系图。
+> 引用一张经典的 实例 - 类 - 元类 的关系图。
 
 <img src="https://tva1.sinaimg.cn/large/006tNbRwly1gaazvpk1j7j30px0r5gmy.jpg" alt="16947663bd7ddd2" style="zoom:50%;" />
 
