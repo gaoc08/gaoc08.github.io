@@ -140,41 +140,379 @@ IMP 和 SEL 在在 method 中是类似 key-value 的存储方式。所以 runtim
 
 ### 3.缓存(objc_cache)
 
-1. ##### 为何要有缓存
+##### 1. 为何要有缓存
 
-   - 从上面的介绍中我们可以发现，方法在类中的存储是通过 list 来存储的。所以方法的查找就需要遍历 method_list，然后通过 SEL 的比对来找到 相应方法的 IMP，最终完成函数的调用。
+- 从上面的介绍中我们可以发现，方法在类中的存储是通过 list 来存储的。所以方法的查找就需要遍历 method_list，然后通过 SEL 的比对来找到 相应方法的 IMP，最终完成函数的调用。
 
-   - 但是如果某个方法要进行高频次的调用，比如
+- 但是如果某个方法要进行高频次的调用，比如
 
-     ```objective-c
-     MyClass *mc = [MyClass new];
-     for (int i = 0; i < 10000; i++) {
-       [mc myMethod];
-     }
-     ```
+  ```objective-c
+  MyClass *mc = [MyClass new];
+  for (int i = 0; i < 10000; i++) {
+    [mc myMethod];
+  }
+  ```
 
-   - 特别是如果 myMethod 出现在 MyClass 的根类中，然后 MyClass 和父类的方法列表都很大的时候。那性能的消耗就难以想象了。。。
+- 特别是如果 myMethod 出现在 MyClass 的根类中，然后 MyClass 和父类的方法列表都很大的时候。那性能的消耗就难以想象了。。。
 
-2. ##### 定义
+##### 2. 定义
+
+```c
+typedef struct objc_cache *Cache
+struct objc_cache {
+    unsigned int mask /* total = mask + 1 */; // 当前能达到的最大 index
+    unsigned int occupied; // 被占用的槽位，因为缓存是以散列表的形式存在的，所以会有空槽，而occupied表示当前被占用的数目
+    Method buckets[1]; //用数组表示的 hash 表，Method 类型，每一个 Method 代表一个方法缓存，buckets 是可变数组。
+};
+```
+
+##### 3. 如何实现缓存
+
+存储的数据结构使用了散列表。
+
+1. cache 的写入：
 
    ```c
-   typedef struct objc_cache *Cache
-   struct objc_cache {
-       unsigned int mask /* total = mask + 1 */; // 当前能达到的最大 index
-       unsigned int occupied; // 被占用的槽位，因为缓存是以散列表的形式存在的，所以会有空槽，而occupied表示当前被占用的数目
-       Method buckets[1]; //用数组表示的 hash 表，Method 类型，每一个 Method 代表一个方法缓存，buckets 是可变数组。
-   };
+   static void cache_fill_nolock(Class cls, SEL sel, IMP imp, id receiver)
+   {
+       cacheUpdateLock.assertLocked();
+   
+       // Never cache before +initialize is done
+       if (!cls->isInitialized()) return;
+   
+       // Make sure the entry wasn't added to the cache by some other thread 
+       // before we grabbed the cacheUpdateLock.
+       if (cache_getImp(cls, sel)) return;
+   
+       cache_t *cache = getCache(cls);
+       cache_key_t key = getKey(sel);
+   
+       // Use the cache as-is if it is less than 3/4 full
+       mask_t newOccupied = cache->occupied() + 1;
+       mask_t capacity = cache->capacity();
+       if (cache->isConstantEmptyCache()) {
+           // Cache is read-only. Replace it.
+           cache->reallocate(capacity, capacity ?: INIT_CACHE_SIZE);
+       }
+       else if (newOccupied <= capacity / 4 * 3) {
+           // Cache is less than 3/4 full. Use it as-is.
+       }
+       else {
+           // Cache is too full. Expand it.
+           cache->expand();
+       }
+   
+       // Scan for the first unused slot and insert there.
+       // There is guaranteed to be an empty slot because the 
+       // minimum size is 4 and we resized at 3/4 full.
+       bucket_t *bucket = cache->find(key, receiver);
+       if (bucket->key() == 0) cache->incrementOccupied();
+       bucket->set(key, imp);
+   }
+   
+   bucket_t * cache_t::find(cache_key_t k, id receiver)
+   {
+       assert(k != 0);
+   
+       bucket_t *b = buckets();
+       mask_t m = mask();
+       mask_t begin = cache_hash(k, m);
+       mask_t i = begin;
+       do {
+           if (b[i].key() == 0  ||  b[i].key() == k) {
+               return &b[i];
+           }
+       } while ((i = cache_next(i, m)) != begin);
+   
+       // hack
+       Class cls = (Class)((uintptr_t)this - offsetof(objc_class, cache));
+       cache_t::bad_cache(receiver, (SEL)k, cls);
+   }
+   
+   static inline mask_t cache_next(mask_t i, mask_t mask) {
+       return (i+1) & mask;
+   }
+   
    ```
 
-3. ##### 如何实现缓存
+   上面的注释已经写的很清楚了。简单总结一下：
 
-   存储的数据结构使用了散列表。
+   - 如果 cache 为还未创建，那么创建一个 INIT_CACHE_SIZE 的 cache。
+   - 如果使用量小于四分之三，那么直接向散列表中添加条目。
+   - 如果使用量超过了四分之三，那么 cache 扩容，扩容为之前容量的二倍。如果溢出 mask 最大值则不扩容。
+   - 通过 fill 中的 find 函数，我们可以发现，这里对于哈希碰撞是采用了开放地址法解决的，也就是从碰撞点开始向后查找，找到一个空 bucket 作为 fill 的目标桶。
 
-   
+2. cache 的读：
+
+   ```c
+   extern IMP cache_getImp(Class cls, SEL sel);
+   ```
+
+   runtime 代码中没有找到 cache_getImp 的实现，网上查资料看到[一篇掘金的文章](https://juejin.im/post/5db30a7af265da4d57770f2b#heading-1)描写的很详细，可以作为参考。
 
 ### 4. Category(objc_category)
 
+##### 1. 定义
 
+```c
+/// An opaque type that represents a category.
+typedef struct objc_category *Category;
+
+struct objc_category {
+    char *category_name; // category 的名字
+    char *class_name; // 类的名字
+    struct objc_method_list *instance_methods; // 实例方法列表
+    struct objc_method_list *class_methods; // 类方法列表
+    struct objc_protocol_list *protocols; // 协议列表
+};
+
+struct category_t {
+    const char *name; // 要扩展的类的名字，非 category 名字
+    classref_t cls; // 要扩展的类的引用
+    struct method_list_t *instanceMethods; // 实例方法列表
+    struct method_list_t *classMethods; // 类方法列表
+    struct protocol_list_t *protocols; // 协议列表
+    struct property_list_t *instanceProperties; // 实例属性列表
+
+    method_list_t *methodsForMeta(bool isMeta) {
+        if (isMeta) return classMethods; // 元类返回的是类方法列表
+        else return instanceMethods; // 非元类返回的是实例方法列表
+    }
+
+    property_list_t *propertiesForMeta(bool isMeta) {
+        if (isMeta) return nil; // classProperties;
+        else return instanceProperties;
+    }
+};
+```
+
+- Category 中可以添加实例方法、类方法、协议。
+- Category 中有属性列表。
+- Category 中没有实例变量列表，所以无法自动生成属性的 get/set 方法，这也是我们无法直接在 category中 添加属性的原因。但是可以通过关联对象添加属性。
+
+##### 2. 实现
+
+```c
+/***********************************************************************
+* _read_images
+* Perform initial processing of the headers in the linked 
+* list beginning with headerList. 
+*
+* Called by: map_images_nolock
+*
+* Locking: runtimeLock acquired by map_images
+**********************************************************************/
+void _read_images(header_info **hList, uint32_t hCount)
+{
+		// 省略代码。。。
+		// Discover categories. 
+    for (EACH_HEADER) {
+        category_t **catlist = 
+            _getObjc2CategoryList(hi, &count);
+        for (i = 0; i < count; i++) {
+            category_t *cat = catlist[i];
+            Class cls = remapClass(cat->cls);
+
+            if (!cls) {
+                // Category's target class is missing (probably weak-linked).
+                // Disavow any knowledge of this category.
+                catlist[i] = nil;
+                if (PrintConnecting) {
+                    _objc_inform("CLASS: IGNORING category \?\?\?(%s) %p with "
+                                 "missing weak-linked target class", 
+                                 cat->name, cat);
+                }
+                continue;
+            }
+
+            // Process this category. 
+            // First, register the category with its target class. 
+            // Then, rebuild the class's method lists (etc) if 
+            // the class is realized. 
+            bool classExists = NO;
+            if (cat->instanceMethods ||  cat->protocols  
+                ||  cat->instanceProperties) 
+            {
+                addUnattachedCategoryForClass(cat, cls, hi);
+                if (cls->isRealized()) {
+                    remethodizeClass(cls);
+                    classExists = YES;
+                }
+                if (PrintConnecting) {
+                    _objc_inform("CLASS: found category -%s(%s) %s", 
+                                 cls->nameForLogging(), cat->name, 
+                                 classExists ? "on existing class" : "");
+                }
+            }
+
+            if (cat->classMethods  ||  cat->protocols  
+                /* ||  cat->classProperties */) 
+            {
+                addUnattachedCategoryForClass(cat, cls->ISA(), hi);
+                if (cls->ISA()->isRealized()) {
+                    remethodizeClass(cls->ISA());
+                }
+                if (PrintConnecting) {
+                    _objc_inform("CLASS: found category +%s(%s)", 
+                                 cls->nameForLogging(), cat->name);
+                }
+            }
+        }
+    }
+
+    ts.log("IMAGE TIMES: discover categories");
+
+    // Category discovery MUST BE LAST to avoid potential races 
+    // when other threads call the new category code before 
+    // this thread finishes its fixups.
+
+		// 省略代码。。。
+}
+
+
+/***********************************************************************
+* remethodizeClass
+* Attach outstanding categories to an existing class.
+* Fixes up cls's method list, protocol list, and property list.
+* Updates method caches for cls and its subclasses.
+* Locking: runtimeLock must be held by the caller
+**********************************************************************/
+static void remethodizeClass(Class cls)
+{
+    category_list *cats;
+    bool isMeta;
+
+    runtimeLock.assertWriting();
+
+    isMeta = cls->isMetaClass();
+
+    // Re-methodizing: check for more categories
+    if ((cats = unattachedCategoriesForClass(cls, false/*not realizing*/))) {
+        if (PrintConnecting) {
+            _objc_inform("CLASS: attaching categories to class '%s' %s", 
+                         cls->nameForLogging(), isMeta ? "(meta)" : "");
+        }
+        
+        attachCategories(cls, cats, true /*flush caches*/);        
+        free(cats);
+    }
+}
+
+// Attach method lists and properties and protocols from categories to a class.
+// Assumes the categories in cats are all loaded and sorted by load order, 
+// oldest categories first.
+static void 
+attachCategories(Class cls, category_list *cats, bool flush_caches)
+{
+    if (!cats) return;
+    if (PrintReplacedMethods) printReplacements(cls, cats);
+
+    bool isMeta = cls->isMetaClass();
+
+    // fixme rearrange to remove these intermediate allocations
+    method_list_t **mlists = (method_list_t **)
+        malloc(cats->count * sizeof(*mlists));
+    property_list_t **proplists = (property_list_t **)
+        malloc(cats->count * sizeof(*proplists));
+    protocol_list_t **protolists = (protocol_list_t **)
+        malloc(cats->count * sizeof(*protolists));
+
+    // Count backwards through cats to get newest categories first
+    int mcount = 0;
+    int propcount = 0;
+    int protocount = 0;
+    int i = cats->count;
+    bool fromBundle = NO;
+    while (i--) {
+        auto& entry = cats->list[i];
+
+        method_list_t *mlist = entry.cat->methodsForMeta(isMeta);
+        if (mlist) {
+            mlists[mcount++] = mlist;
+            fromBundle |= entry.hi->isBundle();
+        }
+
+        property_list_t *proplist = entry.cat->propertiesForMeta(isMeta);
+        if (proplist) {
+            proplists[propcount++] = proplist;
+        }
+
+        protocol_list_t *protolist = entry.cat->protocols;
+        if (protolist) {
+            protolists[protocount++] = protolist;
+        }
+    }
+
+    auto rw = cls->data();
+
+    prepareMethodLists(cls, mlists, mcount, NO, fromBundle);
+    rw->methods.attachLists(mlists, mcount);
+    free(mlists);
+    if (flush_caches  &&  mcount > 0) flushCaches(cls);
+
+    rw->properties.attachLists(proplists, propcount);
+    free(proplists);
+
+    rw->protocols.attachLists(protolists, protocount);
+    free(protolists);
+}
+
+    void attachLists(List* const * addedLists, uint32_t addedCount) {
+        if (addedCount == 0) return;
+
+        if (hasArray()) {
+            // many lists -> many lists
+            uint32_t oldCount = array()->count;
+            uint32_t newCount = oldCount + addedCount;
+            setArray((array_t *)realloc(array(), array_t::byteSize(newCount)));
+            array()->count = newCount;
+            memmove(array()->lists + addedCount, array()->lists, 
+                    oldCount * sizeof(array()->lists[0]));
+            memcpy(array()->lists, addedLists, 
+                   addedCount * sizeof(array()->lists[0]));
+        }
+        else if (!list  &&  addedCount == 1) {
+            // 0 lists -> 1 list
+            list = addedLists[0];
+        } 
+        else {
+            // 1 list -> many lists
+            List* oldList = list;
+            uint32_t oldCount = oldList ? 1 : 0;
+            uint32_t newCount = oldCount + addedCount;
+            setArray((array_t *)malloc(array_t::byteSize(newCount)));
+            array()->count = newCount;
+            if (oldList) array()->lists[addedCount] = oldList;
+            memcpy(array()->lists, addedLists, 
+                   addedCount * sizeof(array()->lists[0]));
+        }
+    }
+
+```
+
+- `_read_images` 中的部分代码给出了 Category 的整体加载流程。先看实例相关的，再看类相关的。都是先把 cat 加到 unattached 列表中，然后通过 `remethodizeClass` 方法，将 unattached 的 cats 通过 `attachCategories` 方法 attach 上。
+- 通过` _read_images` 中代码可以发现 protocol 是在类和元类中都存储的。
+- 通过 `attachLists` 函数我们可以发现，Category 的方法等列表都是插入到被扩展的 Class 的列表的前面。
+- 对于函数的方法查找来说，都是通过 list 遍历，这样就导致了 Category 的方法实现可以覆盖被扩展的类。对于同一个类来说，后编译的 Category 的方法会覆盖先编译的 Category。
+
+##### 3. 关联对象
+
+> 使用：
+>
+> ```objective-c
+> -(void)setName:(NSString *)name
+> {
+>     objc_setAssociatedObject(self, @"name",name, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+> }
+> -(NSString *)name
+> {
+>     return objc_getAssociatedObject(self, @"name");    
+> }
+> ```
+
+
+
+1. 
 
 # 2. Runtime 整体流程概述
 
