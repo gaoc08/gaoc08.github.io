@@ -937,12 +937,25 @@ IMP lookUpImpOrForward(Class cls, SEL sel, id inst,
 
 1. 这部分主要是 `_objc_msgForward_impcache` 内实现，是汇编写的，就不贴源码了。
 2. 消息转发主要有两部分组成：一是备用接收者，二是完整转发。
-3. 
-4. 
+3. 备用接收者：
+   1. 运行期系统会问reciever，能否把消息转给其他接收者来处理。
+   2. reciever 通过 `- (id)forwardingTargetForSelector:(SEL)aSelector;` 方法来告诉是否有备用接收者，如果有则返回备用接收者，如果没有，则返回 nil。
+4. 完整转发。
+   1. runtime 向对象发送  `methodSignatureForSelector:` 消息，并取到返回的方法签名。
+   2. 如果方法签名为空，则转发失败。如果不为空则，通过签名生成 NSInvocation 对象。
+   3. 然后 runtime 通过 `forwardInvocation:` 方法，实现完整转发。
+   4. 所以重写 `forwardInvocation:` 的同时也要重写 `methodSignatureForSelector:` 方法。
+   5. 当一个对象由于没有相应的方法实现而无法响应某个消息时，运行时系统将通过 `forwardInvocation:` 消息通知该对象。每个对象都继承了 `forwardInvocation:` 方法，我们可以将消息转发给其它的对象。
 
 # 6. Runtime 的应用
 
+##### 1. Method Swizzling
 
+> 
+
+##### 2. 模拟多继承
+
+>  通过备用接收者，即可以实现 多继承的效果。
 
 # 7. Runtime 的相关问题
 
