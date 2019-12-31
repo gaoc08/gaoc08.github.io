@@ -50,21 +50,56 @@ typedef struct objc_object *id;
 
 ```c
 typedef struct objc_class *Class;
-struct objc_class {
-	Class isa OBJC_ISA_AVAILABILITY; //isa指针指向Meta Class，因为Objc的类的本身也是一个Object，为了处理这个关系，runtime就创造了Meta Class，当给类发送[NSObject alloc]这样消息时，实际上是把这个消息发给了Class Object
+struct objc_class : objc_object {
+    // Class ISA;
+    Class superclass;
+    cache_t cache;             // formerly cache pointer and vtable
+    class_data_bits_t bits;    // class_rw_t * plus custom rr/alloc flags
+    class_rw_t *data() { 
+        return bits.data();
+    }
+    // 省略一些从 bits 中获取信息的方法
+}
 
-#if !__OBJC2__
-	Class super_class; // 父类
-	const char *name; // 类名
-	long version; // 类的版本信息，默认为0
-	long info; // 类信息，供运行期使用的一些位标识
-	long instance_size; // 该类的实例变量大小
-	struct objc_ivar_list *ivars; // 该类的成员变量链表
-	struct objc_method_list **methodLists; // 方法定义的链表
-	struct objc_cache *cache; // 方法缓存，对象接到一个消息会根据isa指针查找消息对象，这时会在methodLists中遍历，如果cache了，常用的方法调用时就能够提高调用的效率。
-	struct objc_protocol_list *protocols; // 协议链表
+struct class_rw_t {
+    uint32_t flags;
+    uint32_t version;
+
+    const class_ro_t *ro;
+
+    method_array_t methods;
+    property_array_t properties;
+    protocol_array_t protocols;
+
+    Class firstSubclass;
+    Class nextSiblingClass;
+
+    char *demangledName;
+    // 省略部分方法
+};
+
+struct class_ro_t {
+    uint32_t flags;
+    uint32_t instanceStart;
+    uint32_t instanceSize;
+#ifdef __LP64__
+    uint32_t reserved;
 #endif
-} OBJC2_UNAVAILABLE;
+
+    const uint8_t * ivarLayout;
+    
+    const char * name;
+    method_list_t * baseMethodList;
+    protocol_list_t * baseProtocols;
+    const ivar_list_t * ivars;
+
+    const uint8_t * weakIvarLayout;
+    property_list_t *baseProperties;
+
+    method_list_t *baseMethods() const {
+        return baseMethodList;
+    }
+};
 
 ```
 
@@ -92,16 +127,24 @@ struct objc_class {
 
 ### 2. Method & SEL & IMP
 
-##### 1. 方法(objc_method)
+##### 1. 方法(method_t)
 
 ```c
-typedef struct objc_method *Method;
+typedef struct method_t *Method;
+struct method_t {
+    SEL name;
+    const char *types;
+    IMP imp;
 
-struct objc_method {
-    SEL method_name; //方法名
-    char *method_types; //方法类型
-    IMP method_imp; //方法实现
-} OBJC2_UNAVAILABLE;
+    struct SortBySELAddress :
+        public std::binary_function<const method_t&,
+                                    const method_t&, bool>
+    {
+        bool operator() (const method_t& lhs,
+                         const method_t& rhs)
+        { return lhs.name < rhs.name; }
+    };
+};
 ```
 
 
@@ -138,7 +181,7 @@ IMP 和 SEL 在在 method 中是类似 key-value 的存储方式。所以 runtim
 
 
 
-### 3.缓存(objc_cache)
+### 3.缓存(cache_t)
 
 ##### 1. 为何要有缓存
 
@@ -158,11 +201,45 @@ IMP 和 SEL 在在 method 中是类似 key-value 的存储方式。所以 runtim
 ##### 2. 定义
 
 ```c
-typedef struct objc_cache *Cache
-struct objc_cache {
-    unsigned int mask /* total = mask + 1 */; // 当前能达到的最大 index
-    unsigned int occupied; // 被占用的槽位，因为缓存是以散列表的形式存在的，所以会有空槽，而occupied表示当前被占用的数目
-    Method buckets[1]; //用数组表示的 hash 表，Method 类型，每一个 Method 代表一个方法缓存，buckets 是可变数组。
+struct cache_t {
+    struct bucket_t *_buckets; //用数组表示的 hash 表，Method 类型，每一个 Method 代表一个方法缓存，buckets 是可变数组。
+    mask_t _mask; // 当前能达到的最大 index
+    mask_t _occupied; // 被占用的槽位，因为缓存是以散列表的形式存在的，所以会有空槽，而occupied表示当前被占用的数目
+
+public:
+    struct bucket_t *buckets();
+    mask_t mask();
+    mask_t occupied();
+    void incrementOccupied();
+    void setBucketsAndMask(struct bucket_t *newBuckets, mask_t newMask);
+    void initializeToEmpty();
+
+    mask_t capacity();
+    bool isConstantEmptyCache();
+    bool canBeFreed();
+
+    static size_t bytesForCapacity(uint32_t cap);
+    static struct bucket_t * endMarker(struct bucket_t *b, uint32_t cap);
+
+    void expand();
+    void reallocate(mask_t oldCapacity, mask_t newCapacity);
+    struct bucket_t * find(cache_key_t key, id receiver);
+
+    static void bad_cache(id receiver, SEL sel, Class isa) __attribute__((noreturn));
+};
+
+struct bucket_t {
+private:
+    cache_key_t _key;
+    IMP _imp;
+
+public:
+    inline cache_key_t key() const { return _key; }
+    inline IMP imp() const { return (IMP)_imp; }
+    inline void setKey(cache_key_t newKey) { _key = newKey; }
+    inline void setImp(IMP newImp) { _imp = newImp; }
+
+    void set(cache_key_t newKey, IMP newImp);
 };
 ```
 
@@ -255,16 +332,8 @@ struct objc_cache {
 ##### 1. 定义
 
 ```c
-/// An opaque type that represents a category.
-typedef struct objc_category *Category;
 
-struct objc_category {
-    char *category_name; // category 的名字
-    char *class_name; // 类的名字
-    struct objc_method_list *instance_methods; // 实例方法列表
-    struct objc_method_list *class_methods; // 类方法列表
-    struct objc_protocol_list *protocols; // 协议列表
-};
+typedef struct category_t *Category;
 
 struct category_t {
     const char *name; // 要扩展的类的名字，非 category 名字
@@ -512,23 +581,368 @@ attachCategories(Class cls, category_list *cats, bool flush_caches)
 
 
 
-1. 
+1. 几个相关概念
+
+   - AssociationsManager：其中包含一个静态变量 static AssociationsHashMap *map，保存所有关联对象的信息。是一个全局的 map。
+   - AssociationsHashMap：全局 map ，保存所有关联对象的信息。
+   - ObjectAssociationMap：保存一个 object 的所有关联对象信息。
+   - ObjcAssociation：保存一条关联对象信息。
+   - 以上概念的关系如下图，图片引用自 [文章](https://juejin.im/post/5af86b276fb9a07aa34a59e6)：
+
+   ![1635a628a228e34](https://tva1.sinaimg.cn/large/006tNbRwly1gaetrcissjj30s80hwaed.jpg)
+
+2. 源码实现：
+
+   ```c
+   // 获取关联对象的值。
+   id _object_get_associative_reference(id object, void *key) {
+       id value = nil;
+       uintptr_t policy = OBJC_ASSOCIATION_ASSIGN;
+       {
+           AssociationsManager manager;
+           AssociationsHashMap &associations(manager.associations());
+           disguised_ptr_t disguised_object = DISGUISE(object);
+           AssociationsHashMap::iterator i = associations.find(disguised_object);
+           if (i != associations.end()) {
+               ObjectAssociationMap *refs = i->second;
+               ObjectAssociationMap::iterator j = refs->find(key);
+               if (j != refs->end()) {
+                   ObjcAssociation &entry = j->second;
+                   value = entry.value();
+                   policy = entry.policy();
+                   if (policy & OBJC_ASSOCIATION_GETTER_RETAIN) ((id(*)(id, SEL))objc_msgSend)(value, SEL_retain);
+               }
+           }
+       }
+       if (value && (policy & OBJC_ASSOCIATION_GETTER_AUTORELEASE)) {
+           ((id(*)(id, SEL))objc_msgSend)(value, SEL_autorelease);
+       }
+       return value;
+   }
+   
+   // 设置关联对象的值。
+   void _object_set_associative_reference(id object, void *key, id value, uintptr_t policy) {
+       // retain the new value (if any) outside the lock.
+       ObjcAssociation old_association(0, nil);
+       id new_value = value ? acquireValue(value, policy) : nil;
+       {
+           AssociationsManager manager;
+           AssociationsHashMap &associations(manager.associations());
+           disguised_ptr_t disguised_object = DISGUISE(object);
+           if (new_value) {
+               // break any existing association.
+               AssociationsHashMap::iterator i = associations.find(disguised_object);
+               if (i != associations.end()) {
+                   // secondary table exists
+                   ObjectAssociationMap *refs = i->second;
+                   ObjectAssociationMap::iterator j = refs->find(key);
+                   if (j != refs->end()) {
+                       old_association = j->second;
+                       j->second = ObjcAssociation(policy, new_value);
+                   } else {
+                       (*refs)[key] = ObjcAssociation(policy, new_value);
+                   }
+               } else {
+                   // create the new association (first time).
+                   ObjectAssociationMap *refs = new ObjectAssociationMap;
+                   associations[disguised_object] = refs;
+                   (*refs)[key] = ObjcAssociation(policy, new_value);
+                   object->setHasAssociatedObjects();
+               }
+           } else {
+               // setting the association to nil breaks the association.
+               AssociationsHashMap::iterator i = associations.find(disguised_object);
+               if (i !=  associations.end()) {
+                   ObjectAssociationMap *refs = i->second;
+                   ObjectAssociationMap::iterator j = refs->find(key);
+                   if (j != refs->end()) {
+                       old_association = j->second;
+                       refs->erase(j);
+                   }
+               }
+           }
+       }
+       // release the old value (outside of the lock).
+       if (old_association.hasValue()) ReleaseValue()(old_association);
+   }
+   ```
+
+   - 上面的 map 都是使用了 c++ 的 unordered_map 来作为存储数据结构，所以没有处理 hash 碰撞的代码。
+
+   - 通过之前的几个基本概念中图示的讲解，这里的代码就变得很清晰了，就是按照上图的数据结构，从外向内查找和插入。
+
+   - 关联对象的存储是存在全局的 map 中，并没有存储在相应的 object 中。而在 object 销毁的时候，会清除掉全局 map 中相应的条目。参考代码如下：
+
+     ```c
+     /***********************************************************************
+     * objc_destructInstance
+     * Destroys an instance without freeing memory. 
+     * Calls C++ destructors.
+     * Calls ARR ivar cleanup.
+     * Removes associative references.
+     * Returns `obj`. Does nothing if `obj` is nil.
+     * Be warned that GC DOES NOT CALL THIS. If you edit this, also edit finalize.
+     * CoreFoundation and other clients do call this under GC.
+     **********************************************************************/
+     void *objc_destructInstance(id obj) 
+     {
+         if (obj) {
+             // Read all of the flags at once for performance.
+             bool cxx = obj->hasCxxDtor();
+             bool assoc = !UseGC && obj->hasAssociatedObjects();
+             bool dealloc = !UseGC;
+     
+             // This order is important.
+             if (cxx) object_cxxDestruct(obj);
+             if (assoc) _object_remove_assocations(obj);
+             if (dealloc) obj->clearDeallocating();
+         }
+     
+         return obj;
+     }
+     ```
+
+   - 关联属性的内存标记有 assign/retaion/copy，但是没有 weak。
 
 # 2. Runtime 整体流程概述
 
+> 这部分参考了[这篇文章](https://juejin.im/post/5cfdbcb76fb9a07eb3096f01)。
+
+```c
+/***********************************************************************
+* lookUpImpOrForward.
+* The standard IMP lookup. 
+* initialize==NO tries to avoid +initialize (but sometimes fails)
+* cache==NO skips optimistic unlocked lookup (but uses cache elsewhere)
+* Most callers should use initialize==YES and cache==YES.
+* inst is an instance of cls or a subclass thereof, or nil if none is known. 
+*   If cls is an un-initialized metaclass then a non-nil inst is faster.
+* May return _objc_msgForward_impcache. IMPs destined for external use 
+*   must be converted to _objc_msgForward or _objc_msgForward_stret.
+*   If you don't want forwarding at all, use lookUpImpOrNil() instead.
+**********************************************************************/
+IMP lookUpImpOrForward(Class cls, SEL sel, id inst, 
+                       bool initialize, bool cache, bool resolver)
+{
+    Class curClass;
+    IMP imp = nil;
+    Method meth;
+    bool triedResolver = NO;
+
+    runtimeLock.assertUnlocked();
+    //============= 消息传递阶段开始 ==============
+
+    // Optimistic cache lookup
+    if (cache) {
+        imp = cache_getImp(cls, sel);
+        if (imp) return imp;
+    }
+
+    if (!cls->isRealized()) {
+        rwlock_writer_t lock(runtimeLock);
+        realizeClass(cls);
+    }
+
+    if (initialize  &&  !cls->isInitialized()) {
+        _class_initialize (_class_getNonMetaClass(cls, inst));
+        // If sel == initialize, _class_initialize will send +initialize and 
+        // then the messenger will send +initialize again after this 
+        // procedure finishes. Of course, if this is not being called 
+        // from the messenger then it won't happen. 2778172
+    }
+
+    // The lock is held to make method-lookup + cache-fill atomic 
+    // with respect to method addition. Otherwise, a category could 
+    // be added but ignored indefinitely because the cache was re-filled 
+    // with the old value after the cache flush on behalf of the category.
+ retry:
+    runtimeLock.read();
+
+    // Ignore GC selectors
+    if (ignoreSelector(sel)) {
+        imp = _objc_ignored_method;
+        cache_fill(cls, sel, imp, inst);
+        goto done;
+    }
+
+    // Try this class's cache.
+
+    imp = cache_getImp(cls, sel);
+    if (imp) goto done;
+
+    // Try this class's method lists.
+
+    meth = getMethodNoSuper_nolock(cls, sel);
+    if (meth) {
+        log_and_fill_cache(cls, meth->imp, sel, inst, cls);
+        imp = meth->imp;
+        goto done;
+    }
+
+    // Try superclass caches and method lists.
+
+    curClass = cls;
+    while ((curClass = curClass->superclass)) {
+        // Superclass cache.
+        imp = cache_getImp(curClass, sel);
+        if (imp) {
+            if (imp != (IMP)_objc_msgForward_impcache) {
+                // Found the method in a superclass. Cache it in this class.
+                log_and_fill_cache(cls, imp, sel, inst, curClass);
+                goto done;
+            }
+            else {
+                // Found a forward:: entry in a superclass.
+                // Stop searching, but don't cache yet; call method 
+                // resolver for this class first.
+                break;
+            }
+        }
+
+        // Superclass method list.
+        meth = getMethodNoSuper_nolock(curClass, sel);
+        if (meth) {
+            log_and_fill_cache(cls, meth->imp, sel, inst, curClass);
+            imp = meth->imp;
+            goto done;
+        }
+    }
+    //============= 消息传递阶段结束 ==============
+    
+    //============= 消息解析阶段开始 ==============
+    // No implementation found. Try method resolver once.
+
+    if (resolver  &&  !triedResolver) {
+        runtimeLock.unlockRead();
+        _class_resolveMethod(cls, sel, inst);
+        // Don't cache the result; we don't hold the lock so it may have 
+        // changed already. Re-do the search from scratch instead.
+        triedResolver = YES;
+        goto retry;
+    }
+    //============= 消息解析阶段结束 ==============
+
+    //============= 消息转发阶段开始 ==============
+    // No implementation found, and method resolver didn't help. 
+    // Use forwarding.
+
+    imp = (IMP)_objc_msgForward_impcache;
+    cache_fill(cls, sel, imp, inst);
+    //============= 消息转发阶段结束 ==============
+
+ done:
+    runtimeLock.unlockRead();
+
+    // paranoia: look for ignored selectors with non-ignored implementations
+    assert(!(ignoreSelector(sel)  &&  imp != (IMP)&_objc_ignored_method));
+
+    // paranoia: never let uncached leak out
+    assert(imp != _objc_msgSend_uncached_impcache);
+
+    return imp;
+}
+```
 
 
-# 3. 消息传递机制
+
+整体上消息的流程如下：
+
+1. 进入消息传递阶段，判断消息接受者是否为 nil。
+2. 利用 isa 指针找到自己的类对象。
+3. 在类对象的 cache_t（方法缓存）中查找是否有方法，有则直接取出 bucket_t（桶）中 IMP（实现）。无则继续。
+4. 在类对象的 method_list_t 中查找方法。有则直接取出，无则继续。
+5. 找到类对象的 super_class ，继续在其父类中重复上面两个步骤进行查找。
+6. 若一直往上都没有找到方法的实现，那么消息传递阶段结束，进入动态解析阶段。
+7. 动态解析阶段，在这个阶段，若解析到方法，则结束。否则继续。
+8. 最后会进入消息转发阶段，在这里可以指定别的类为自己实现这个方法。
+9. 若上方步骤都没有找到方法的实现，则会报方法找不到的错误，无法识别消息，unrecognzied selector sent to instance。
+
+整体大概分为 消息发送阶段、消息解析阶段、消息转发阶段，三个阶段。流程大概如下：
+
+<img src="https://tva1.sinaimg.cn/large/006tNbRwly1gafnoq3bhkj31100nuwio.jpg" alt="image-20191231093856404" style="zoom:80%;" />
 
 
 
-# 4. 消息转发机制
+
+
+# 3. 消息传递
+
+消息传递的流程如下图：
+
+<img src="https://tva1.sinaimg.cn/large/006tNbRwly1gafp6kt3cpj30x60qwwjx.jpg" alt="image-20191231103042073" style="zoom:80%;" />
 
 
 
-# 5. Runtime 的应用
+# 4. 消息解析
+
+1. 消息解析的源码如下：
+
+   ```c
+   /***********************************************************************
+   * _class_resolveMethod
+   * Call +resolveClassMethod or +resolveInstanceMethod.
+   * Returns nothing; any result would be potentially out-of-date already.
+   * Does not check if the method already exists.
+   **********************************************************************/
+   void _class_resolveMethod(Class cls, SEL sel, id inst)
+   {
+       if (! cls->isMetaClass()) {
+           // try [cls resolveInstanceMethod:sel]
+           _class_resolveInstanceMethod(cls, sel, inst);
+       } 
+       else {
+           // try [nonMetaClass resolveClassMethod:sel]
+           // and [cls resolveInstanceMethod:sel]
+           _class_resolveClassMethod(cls, sel, inst);
+           if (!lookUpImpOrNil(cls, sel, inst, 
+                               NO/*initialize*/, YES/*cache*/, NO/*resolver*/)) 
+           {
+               _class_resolveInstanceMethod(cls, sel, inst);
+           }
+       }
+   }
+   
+   ```
+
+   
+
+2. 消息动态解析阶段的主要流程如下：
+
+   <img src="https://tva1.sinaimg.cn/large/006tNbRwly1gafphbt2doj30ty0q4juq.jpg" alt="image-20191231104101394" style="zoom:80%;" />
+
+2. 消息解析是通过两个 resolve 方法来实现动态解析的。参考代码如下：
+
+   ```objective-c
+   - (void)viewDidLoad {
+       [super viewDidLoad];
+       // Do any additional setup after loading the view, typically from a nib.
+       //执行foo函数
+       [self performSelector:@selector(foo:)];
+   }
+   
+   + (BOOL)resolveInstanceMethod:(SEL)sel { //resolveClassMethod
+       if (sel == @selector(foo:)) {//如果是执行foo函数，就动态解析，指定新的IMP
+           class_addMethod([self class], sel, (IMP)fooMethod, "v@:"); // 通过 class_addMethod 方法，可以给某个 SEL 指定起实现 IMP。
+           return YES;
+       }
+       return [super resolveInstanceMethod:sel];
+   }
+   
+   void fooMethod(id obj, SEL _cmd) {
+       NSLog(@"Doing foo");//新的foo函数
+   }
+   ```
+
+# 5. 消息转发
+
+1. 这部分主要是 `_objc_msgForward_impcache` 内实现，是汇编写的，就不贴源码了。
+2. 消息转发主要有两部分组成：一是备用接收者，二是完整转发。
+3. 
+4. 
+
+# 6. Runtime 的应用
 
 
 
-# 6. Runtime 的相关问题
+# 7. Runtime 的相关问题
 
