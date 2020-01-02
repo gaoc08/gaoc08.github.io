@@ -951,7 +951,9 @@ IMP lookUpImpOrForward(Class cls, SEL sel, id inst,
 
 ##### 1. Method Swizzling
 
-> 
+> 本质上就是实现方法的实现，也就是 IMP 的交换。
+
+先占坑，回头补上，可以先参考[这篇文章](http://yulingtianxia.com/blog/2017/04/17/Objective-C-Method-Swizzling/)。
 
 ##### 2. 模拟多继承
 
