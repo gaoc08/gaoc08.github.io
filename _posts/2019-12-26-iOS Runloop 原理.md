@@ -298,49 +298,108 @@ CF_EXPORT CFRunLoopRef _CFRunLoopGet0(_CFThreadRef t) {
 
 
 
-# 3. Runloop 使用
-
-
-
-# 4. Runloop 应用
-
-
+# 3. Runloop 应用
 
 ### 1. AutoReleasePool
 
-
+1. 在程序启动的时候，AutoReleasePool 会在 Runloop 这边注册两个 Observer。
+2. 第一个 Observer 是 kCFRunLoopEntry，在进入 Runloop 的时候。
+   1. 此时会调用 objc_autoreleasePoolPush() 向 AutoReleasePoolPage 中添加哨兵标志创建新的 auto release pool。
+   2. 这个 Observer 的 order 是 -2147483647，优先级最高，确保其他回调都发送在 auto release pool 创建之后。
+3. 第二个 Observer 是kCFRunLoopExit，在退出 Runloop 的时候。
+   1. 此时会调用 objc_autoreleasePoolPop() ，一直 pop 到遇到哨兵，销毁 auto release pool。
+   2. 这个 Observer 的 order 是 2147483647，优先级最低，确保所有其他回调都在 auto release pool 销毁之前执行。
+4. 第三个 Observer 是 kCFRunLoopBeforeWaiting，在 Runloop 休眠之前。
+   1. 此时会先调用 objc_autoreleasePoolPop() 释放，然后再调用 objc_autoreleasePoolPush() 创建。
+   2. 这个 Observer 的 order 也是 2147483647，优先级最低。
 
 
 
 ### 2. Timer
 
+##### 1. NSTimer & CFRunLoopTimerRef
 
+1. NSTimer 和 CFRunloopTimerRef 是 toll-free bridged。他们都是上面提到的 timer source。
+2. 上面已经提到过，Timer Source 不是实时的，也不是一定会触发。
+3. NSTimer 有个 tolerance 的属性，可以放宽触发 timer 的条件，在规定时间点**之后** tolerance 范围内都可能触发。设置 tolerance 有助于减少 app 的耗电。
+4. 毋庸置疑，NSTimer 是基于 Runloop 的。
+
+##### 2. GCD Timer
+
+1. 在使用 GCD Timer 的时候，不需要操心 Runloop 的事情（线程是否有 runloop，runloop mode 等等）。
+2. 据[文章](https://juejin.im/post/5aca2b0a6fb9a028d700e1f8#heading-30)说，GCD Timer 最终也会创建 Source 通过 runloop 执行，所以 runloop 的大量任务也会导致 GCD Timer 的延迟等。不过这里我还暂时没有找到这种说法的依据。
+
+##### 3. CADisplayLink
+
+1. CADisplayLink 和 NSTimer 一样，是基于一个活着的 Runloop 和它的 Mode。
+2. 精确度高于 NSTimer。一般在每次屏幕刷新结束之后调用。
+3. 一般在和屏幕刷新频率相关的定时器会使用。
 
 ### 3. 事件响应
 
-
+1. 硬件事件（触摸、锁屏、摇晃等） 是通过 Port-based 的 input source，也就是 source1 来传递的。
+2. 当一个硬件事件发生后，首先由 IOKit.framework 生成一个 IOHIDEvent 事件并由 SpringBoard 接收。
+3. SpringBoard 只接收按键（锁屏、静音等），触摸，加速，接近传感器等几种 Event，随后用 mach port 转发给需要的App进程。
+4. 进而苹果注册的那个 Source1 就会触发回调，并调用 _UIApplicationHandleEventQueue() 进行应用内部的分发。
 
 ### 4. 手势识别
 
-
+1. 当上面的事件响应识别出一个手势的时候，会 cancel 掉 touch begin 等底层的回调。同时将识别出来的手势（UIGestureRecognizer）标记为待处理。
+2. 系统监听 kCFRunLoopBeforeWaiting 事件。在回调中处理所有待处理的手势，执行 UIGestureRecognizer 的回调。
 
 ### 5. 界面更新
 
-
+1. 当发生以下情况时，系统就会将对应的 UIView/CALayer 标记为待处理，并放到一个全局容器中。
+   1. 手动修改了 UI，如改变了 UIView 的 Frame 等。
+   2. 手动调用了 setNeedsLayout/setNeedsDisplay 方法。
+2. 系统监听 kCFRunLoopBeforeWaiting/kCFRunLoopExit 两个事件，并在回调中遍历全局容器中所有待处理的 UIView/CALayer，并执行界面的更新。
+3. 所以如果 runloop 有大量的耗时工作，就会导致 UI 卡顿。
 
 ### 6. 常驻线程
 
+> 本节例子来源于 AFNetworking。
+
+1. 创建一个 thread。
+
+2. thread 内部创建好 runloop。
+
+3. 保持 runloop 的运行。
+
+   ```objc
+   + (NSThread *)networkRequestThread {
+       static NSThread *_networkRequestThread = nil;
+       static dispatch_once_t oncePredicate;
+       dispatch_once(&oncePredicate, ^{
+           _networkRequestThread = [[NSThread alloc] initWithTarget:self selector:@selector(networkRequestThreadEntryPoint:) object:nil];
+           [_networkRequestThread start];
+       });
+   
+       return _networkRequestThread;
+   }
+   
+   + (void)networkRequestThreadEntryPoint:(id)__unused object {
+       @autoreleasepool {
+           [[NSThread currentThread] setName:@"AFNetworking"];
+   
+           NSRunLoop *runLoop = [NSRunLoop currentRunLoop];
+           [runLoop addPort:[NSMachPort port] forMode:NSDefaultRunLoopMode];
+           [runLoop run];
+       }
+   }
+   ```
 
 
 
+### 7. 性能优化
 
-
+1. 通过 Runloop 的 Observer 可以监听 kCFRunLoopBeforeWaiting 事件。
+2. 将部分工作移到 kCFRunLoopBeforeWaiting 回调中，可以优化性能。
 
 
 
 # 参考文章
 
-1. [掘金 - iOS RunLoop详解](https://juejin.im/post/5aca2b0a6fb9a028d700e1f8)
-2. [深入理解RunLoop](https://blog.ibireme.com/2015/05/18/runloop/)
-
+1. [Apple Developer Run Loops](https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/Multithreading/RunLoopManagement/RunLoopManagement.html#//apple_ref/doc/uid/10000057i-CH16-131281)
+2. [掘金 - iOS RunLoop详解](https://juejin.im/post/5aca2b0a6fb9a028d700e1f8)
+3. [深入理解RunLoop](https://blog.ibireme.com/2015/05/18/runloop/)
 
