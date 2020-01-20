@@ -178,6 +178,7 @@ struct __CFRunLoopMode {
    - 在执行完之后就会自动从 runloop 中移除。
    - 需要有 active 的 runloop 才能在该线程上 perform selector。
    - runloop 会在一个 loop 中执行完所有在排队的 perform selector source，而不是一个 loop 处理一个 source。
+   - selector 会严格按照添加的顺序执行。
 
 ##### 3. Timer Source
 
